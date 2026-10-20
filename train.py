@@ -196,6 +196,12 @@ def main() -> None:
                    help="rechaza también si la amplificación adjunta ||p_0||/||p_S|| supera esto")
     p.add_argument("--checkpointing", action="store_true",
                    help="recomputa el forward en el backward: -78%% de memoria, +31%% de tiempo")
+
+    p.add_argument("--noise-type", choices=["gaussian", "poisson"], default="gaussian",
+                   help="modelo de ruido: gaussian (default) o poisson")
+    p.add_argument("--poisson-peak", type=float, default=100.0,
+                   help="peak de fotones para ruido Poisson (ej. 30, 50, 100)")
+    
     args = p.parse_args()
     if args.sigma_max > 0 and not 0 <= args.sigma_min <= args.sigma_max:
         p.error(f"--sigma-min {args.sigma_min:g} tiene que estar en [0, --sigma-max "
@@ -288,7 +294,12 @@ def main() -> None:
         for _ in range(ACUMULACION):
             # El ruido se suma en CPU antes de subir: una transferencia por tensor en vez de tres.
             lote = next(lotes)
-            if args.sigma_max > 0:
+
+            if args.noise_types == 'poisson':
+                noisy = add_poisson_noise(lote, peak=args.poisson_peak, generator=noise_gen
+                ).to(device, non_blocking=True)
+
+            elif args.sigma_max > 0:
                 noisy = add_noise_ciego(lote, args.sigma_min, args.sigma_max, noise_gen,
                                         NOISE_SCALE)[0].to(device, non_blocking=True)
             else:

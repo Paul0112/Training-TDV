@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from ddr.data import ImageDataset2D, add_noise, psnr
+from ddr.data import ImageDataset2D, add_noise, add_poisson_noise, psnr
 from ddr.data3d import UMBRAL_TEJIDO
 from ddr.model import VNet2D, VNet3D
 from ddr.qsm3d import nrmse_pct
@@ -39,15 +39,17 @@ def load_vnet(path, device="cpu", efficient: bool = False) -> tuple[VNet2D | VNe
 
 @torch.no_grad()
 def evaluate_denoising(model, dataset, sigma=25.0, sigma_ref=25.0, device="cpu",
-                       seed=1234, data_range=1.0, noise_scale=255.0) -> dict:
-    """PSNR promedio sobre `dataset`, con una realización de ruido fija por imagen."""
-    scale = sigma_ref / sigma
+                       seed=1234, data_range=1.0, noise_scale=255.0, noise_type='gaussian', poisson_peak='100.0') -> dict:
+    """PSNR promedio sobre `dataset`, con una realización de ruido fija (gaussiana o poisson) por imagen."""
+    scale = (sigma_ref / sigma) if noise_type == "gaussian" else 1.0 # esto hay que cambiarlo para hacer inferencia sobre la correspondencia sigma -> peak
     rows = []
     for i in range(len(dataset)):
         clean, name = dataset[i]
         clean = clean.unsqueeze(0).to(device)
         gen = torch.Generator(device="cpu").manual_seed(seed + i)
-        noisy = add_noise(clean.cpu(), sigma, gen, noise_scale).to(device)
+
+        if noise_type == 'poisson': noisy = add_poisson_noise(clean.cpu(), peak=poisson_peak, generator=gen).to(device)
+        else: noisy = add_noise(clean.cpu(), sigma, gen, noise_scale).to(device)
 
         denoised = model(noisy * scale, noisy * scale)[-1] / scale
         rows.append({
@@ -57,7 +59,9 @@ def evaluate_denoising(model, dataset, sigma=25.0, sigma_ref=25.0, device="cpu",
         })
 
     return {
-        "sigma": sigma,
+        "noise_type": noise_type,
+        "sigma": sigma if noise_type == "gaussian" else None,
+        "poisson_peak": poisson_peak if noise_type == "poisson" else None,
         "num_images": len(rows),
         "psnr_noisy": float(np.mean([r["psnr_noisy"] for r in rows])),
         "psnr_denoised": float(np.mean([r["psnr_denoised"] for r in rows])),
@@ -134,6 +138,8 @@ def main() -> None:
     p.add_argument("--gray", action="store_true")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--output", help="escribir el reporte JSON acá")
+    p.add_argument("--noise-type", choices=["gaussian", "poisson"], default="gaussian",help="Tipo de ruido con el que degradar las imágenes de prueba")
+    p.add_argument("--poisson-peak", type=float, default=100.0, help="Fotones peak si se usa ruido Poisson")
     args = p.parse_args()
 
     names = None
@@ -143,11 +149,14 @@ def main() -> None:
     dataset = ImageDataset2D.from_root(args.data, args.split,
                                        channels=1 if args.gray else 3, names=names)
     model, config = load_vnet(args.checkpoint, args.device)
-    report = evaluate_denoising(model, dataset, args.sigma, args.sigma_ref, args.device)
+    report = evaluate_denoising(model, dataset, args.sigma, args.sigma_ref, args.device, noise_type=args.noise_type, poisson_peak=args.poisson_peak)
 
     print(f"checkpoint : {args.checkpoint}")
     print(f"conjunto   : {args.split} ({report['num_images']} imágenes)")
-    print(f"sigma      : {args.sigma}   S={config['S']}")
+    if args.noise_type == "poisson":
+        print(f"ruido   : Poisson (peak={args.poisson_peak})")
+    else:
+        print(f"sigma   : {args.sigma}   S={config['S']}")
     print(f"PSNR ruido : {report['psnr_noisy']:.2f} dB")
     print(f"PSNR salida: {report['psnr_denoised']:.2f} dB")
 
