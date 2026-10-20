@@ -258,7 +258,10 @@ def main() -> None:
     if args.lr_halvings:
         hitos = hitos[:args.lr_halvings]
     sched = torch.optim.lr_scheduler.MultiStepLR(opt, milestones=hitos, gamma=0.5)
-    noise_gen = torch.Generator(device="cpu").manual_seed(args.seed * 100 + 1)
+
+    #noise_gen = torch.Generator(device="cpu").manual_seed(args.seed * 100 + 1)
+    noise_gen = torch.Generator(device=device).manual_seed(args.seed * 100 + 1)
+
     mide_amp = math.isfinite(args.guard_amp)
 
     out.mkdir(parents=True, exist_ok=True)
@@ -297,18 +300,15 @@ def main() -> None:
         for _ in range(ACUMULACION):
             # El ruido se suma en CPU antes de subir: una transferencia por tensor en vez de tres.
             lote = next(lotes)
+            clean = lote.to(device, non_blocking=True)
 
             if args.noise_type == 'poisson':
-                noisy = add_poisson_noise(lote, peak=args.poisson_peak, generator=noise_gen
-                ).to(device, non_blocking=True)
-
+                noisy = add_poisson_noise(clean, peak=args.poisson_peak, generator=noise_gen)
             elif args.sigma_max > 0:
-                noisy = add_noise_ciego(lote, args.sigma_min, args.sigma_max, noise_gen,
-                                        NOISE_SCALE)[0].to(device, non_blocking=True)
+                noisy = add_noise_ciego(clean, args.sigma_min, args.sigma_max, noise_gen, NOISE_SCALE)[0]
             else:
-                noisy = add_noise(lote, args.sigma, noise_gen, NOISE_SCALE).to(device,
-                                                                              non_blocking=True)
-            clean = lote.to(device, non_blocking=True)
+                noisy = add_noise(clean, args.sigma, noise_gen, NOISE_SCALE)
+
             # Materializar `dL/dx_0` cuesta un vjp más por el paso 0. Medido el 2026-10-03
             # sobre 120 iteraciones en `referencia`: no mueve la trayectoria ni un bit.
             if mide_amp:
