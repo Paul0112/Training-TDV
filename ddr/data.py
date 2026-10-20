@@ -103,7 +103,8 @@ def add_poisson_noise(y: torch.Tensor, peak: float = 100.0, generator= None):
     Ruido de Poisson fijando un 'peak' que simula el valor maximo de intensidad para una imagen
     normalizada. 
     """
-    mean = y * peak
+    #mean = y * peak
+    mean = torch.clamp(y, min=0.0) * peak
     poisson_photons = torch.poisson(mean, generator=generator)
     noisy_img = poisson_photons / peak
     

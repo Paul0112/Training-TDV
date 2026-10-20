@@ -295,7 +295,7 @@ def main() -> None:
             # El ruido se suma en CPU antes de subir: una transferencia por tensor en vez de tres.
             lote = next(lotes)
 
-            if args.noise_types == 'poisson':
+            if args.noise_type == 'poisson':
                 noisy = add_poisson_noise(lote, peak=args.poisson_peak, generator=noise_gen
                 ).to(device, non_blocking=True)
 
@@ -390,7 +390,7 @@ def main() -> None:
             model.eval()
             # El sigma de referencia es args.sigma, no SIGMA: se evalúa donde se entrena.
             report = evaluate_denoising(model, eval_set, args.sigma, args.sigma, device,
-                                        data_range=DATA_RANGE, noise_scale=NOISE_SCALE)
+                                        data_range=DATA_RANGE, noise_scale=NOISE_SCALE, noise_type= args.noise_type, poisson_peak= args.poisson_peak)
             model.train()
             dB = report["psnr_denoised"]
             history.append({"iteration": it, "psnr": dB,

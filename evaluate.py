@@ -39,7 +39,7 @@ def load_vnet(path, device="cpu", efficient: bool = False) -> tuple[VNet2D | VNe
 
 @torch.no_grad()
 def evaluate_denoising(model, dataset, sigma=25.0, sigma_ref=25.0, device="cpu",
-                       seed=1234, data_range=1.0, noise_scale=255.0, noise_type='gaussian', poisson_peak='100.0') -> dict:
+                       seed=1234, data_range=1.0, noise_scale=255.0, noise_type='gaussian', poisson_peak=100.0) -> dict:
     """PSNR promedio sobre `dataset`, con una realización de ruido fija (gaussiana o poisson) por imagen."""
     scale = (sigma_ref / sigma) if noise_type == "gaussian" else 1.0 # esto hay que cambiarlo para hacer inferencia sobre la correspondencia sigma -> peak
     rows = []
