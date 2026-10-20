@@ -28,6 +28,11 @@ checkpoints/*
 !checkpoints/Oficiales/*.pth
 !checkpoints/Entrenados/*.pth
 
+# Excepciones para rastrear checkpoints en runs/
+!runs/**/
+!runs/**/*.pt
+!runs/**/*.pth
+
 # Datasets: las imágenes no se versionan; las listas, los README y los scripts que arman ldm100k y
 # ldm100k3d sí. Para re-incluir algo hay que excluir el CONTENIDO (dir/*) y no el directorio, porque
 # git no entra en un directorio excluido.

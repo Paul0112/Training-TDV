@@ -83,7 +83,7 @@ MODES = {
 }
 
 
-def vnet_config(t_init: float, channels: int = CHANNELS) -> dict:
+def vnet_config(t_init: float, channels: int = CHANNELS, dataterm: str = 'denoise') -> dict:
     """Config de la VNet, verificada contra los .pth oficiales."""
     return {
         "S": STEPS,
@@ -92,7 +92,7 @@ def vnet_config(t_init: float, channels: int = CHANNELS) -> dict:
             "num_features": FEATURES, "num_scales": SCALES, "num_mb": MACRO_BLOCKS,
             "multiplier": 1,   # los features NO se duplican al bajar de escala
         }},
-        "D": {"type": "denoise", "config": {"use_prox": True}},
+        "D": {"type": dataterm, "config": {"use_prox": True}},
         "T_mode": "learned", "T": {"init": t_init, "min": 0.0, "max": 1000.0},
         "lambda_mode": "learned", "lambda": {"init": LAMBDA_INIT, "min": 0.0, "max": 1000.0},
     }
@@ -197,10 +197,13 @@ def main() -> None:
     p.add_argument("--checkpointing", action="store_true",
                    help="recomputa el forward en el backward: -78%% de memoria, +31%% de tiempo")
 
+    # modificaciones para ruido poisson
     p.add_argument("--noise-type", choices=["gaussian", "poisson"], default="gaussian",
                    help="modelo de ruido: gaussian (default) o poisson")
     p.add_argument("--poisson-peak", type=float, default=100.0,
                    help="peak de fotones para ruido Poisson (ej. 30, 50, 100)")
+    p.add_argument("--dataterm", choices=["denoise", "poisson"], default="denoise",
+               help="Término de fidelidad de datos: denoise (L2 gaussiano) o poisson")
     
     args = p.parse_args()
     if args.sigma_max > 0 and not 0 <= args.sigma_min <= args.sigma_max:
@@ -226,7 +229,7 @@ def main() -> None:
     torch.backends.cuda.matmul.fp32_precision = precision
 
     # --- MODELO -------------------------------------------------------------------------------
-    config = vnet_config(args.t_init, args.channels)
+    config = vnet_config(args.t_init, args.channels, dataterm=args.dataterm)
     model = VNet2D(config, efficient=args.checkpointing).to(device)
     # Se compila el MÉTODO R.grad, no el módulo: `forward` no lo invoca nadie en el bucle, así que
     # compilar el módulo es un no-op silencioso. Compilar el método además deja el state_dict sin

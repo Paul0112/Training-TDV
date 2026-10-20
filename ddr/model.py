@@ -41,6 +41,28 @@ class L2DenoiseDataterm(torch.nn.Module):
 
     def grad(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return x - z
+    
+
+class PoissonDenoiseDataterm(torch.nn.Module):
+    """Fidelidad de Poisson basada en la log-verosimilitud negativa: D(x, z) = x - z * log(x)."""
+
+    def __init__(self, config: dict | None = None) -> None:
+        super().__init__()
+
+    def energy(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        x_s = torch.clamp(x, min=1e-6)
+        return x_s - z * torch.log(x_s)
+
+    def prox(self, x: torch.Tensor, z: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
+        b = x - tau
+        d = torch.clamp(b * b + 4.0 * tau * z, min=1e-8)
+        return 0.5 * (b + torch.sqrt(d))
+
+    def grad(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        x_s = torch.clamp(x, min=1e-6)
+        return 1.0 - (z / x_s)
+    
+    
 
 
 class VNet2D(torch.nn.Module):
@@ -66,7 +88,11 @@ class VNet2D(torch.nn.Module):
                 self.register_buffer(name, value)
 
         self.R = self.TDV(config["R"]["config"])
-        self.D = L2DenoiseDataterm()
+        d_type = config.get("D", {}).get("type", "denoise")
+        if d_type == "poisson":
+            self.D = PoissonDenoiseDataterm(config["D"].get("config"))
+        else:
+            self.D = L2DenoiseDataterm(config["D"].get("config"))
         self.use_prox: bool = config["D"]["config"]["use_prox"]
 
     @staticmethod

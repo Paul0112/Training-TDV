@@ -104,11 +104,11 @@ def add_poisson_noise(y: torch.Tensor, peak: float = 100.0, generator= None):
     normalizada. 
     """
     #mean = y * peak
-    mean = torch.clamp(y, min=0.0) * peak
+    mean = y * peak
     poisson_photons = torch.poisson(mean, generator=generator)
     noisy_img = poisson_photons / peak
     
-    return noisy_img
+    return torch.clamp(noisy_img, 0.0, 1.0)
 
 def psnr(x, y, data_range: float = 1.0) -> float:
     if isinstance(x, torch.Tensor):
