@@ -24,6 +24,7 @@ __all__ = [
     "load_image",
     "list_images",
     "add_noise",
+    "add_poisson_noise",
     "psnr",
 ]
 
@@ -97,6 +98,18 @@ def add_noise(y: torch.Tensor, sigma: float, generator=None, noise_scale: float 
     noise = torch.randn(y.shape, generator=generator, dtype=y.dtype, device=y.device)
     return y + (sigma / noise_scale) * noise
 
+def add_poisson_noise(y: torch.Tensor, peak: float = 100.0, seed: int):
+    """
+    Ruido de Poisson fijando un 'peak' que simula el valor maximo de intensidad para una imagen
+    normalizada. 
+    """
+    generator = torch.Generator(device=y.device) # seed
+    generator.manual_seed(seed) 
+    mean = y * peak
+    poisson_photons = torch.poisson(mean, generator=generator)
+    noisy_img = poisson_photons / peak
+    
+    return noisy_img, poisson_photons
 
 def psnr(x, y, data_range: float = 1.0) -> float:
     if isinstance(x, torch.Tensor):

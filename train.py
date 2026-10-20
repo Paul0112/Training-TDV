@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ddr.data import ImageDataset2D, PatchDataset2D, add_noise
+from ddr.data import ImageDataset2D, PatchDataset2D, add_noise, add_poisson_noise
 from ddr.data3d import add_noise_ciego
 from ddr.model import VNet2D
 from evaluate import evaluate_denoising

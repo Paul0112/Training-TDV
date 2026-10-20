@@ -13,7 +13,6 @@ wheels/
 data/
 # Sin barra final a propósito: así cubre el directorio y también un symlink `runs -> <repo>/runs`,
 # que es como un worktree comparte las salidas de entrenamiento en vez de duplicarlas.
-runs
 *.pth
 *.pt
 *.mat
