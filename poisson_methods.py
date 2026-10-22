@@ -1,6 +1,4 @@
 import numpy as np
-from tdv import model
-from tdv.denoise_utils import check_color, denoise_z, load_model, DEVICE
 import torch
 
 """
@@ -38,41 +36,33 @@ def anscombe_inv_unbiased(d):
 
 
 
-def denoise_anscombe(z, peak, vn, unbiased= True):
-    z, color = check_color(np.asarray(z, dtype=np.float32))
-    if vn is None: vn, _ = load_model(color)
-    z_counts = z * peak
-    z_ansc = anscombe(z_counts)
-    
-    a_min = 2.0 * np.sqrt(3.0 / 8.0) # minimax norm
+@torch.no_grad()
+def denoise_anscombe(z, peak, vn, unbiased=True, sigma_ref=25.0):
+    z = np.asarray(z, dtype=np.float32)
+    if z.ndim == 2: z = z[..., None]
+
+    z_ansc = anscombe(z * peak)
+    a_min = 2.0 * np.sqrt(3.0 / 8.0)
     delta = 2.0 * np.sqrt(peak + 3.0 / 8.0) - a_min
     z_input = ((z_ansc - a_min) / delta).astype(np.float32)
-    
-    x = denoise_z(vn=vn, z=z_input, sigma=255.0 / delta, scaled=True)
+
+    parameter = next(vn.parameters())
+    z_tensor = torch.from_numpy(
+        np.ascontiguousarray(z_input.transpose(2, 0, 1)[None])
+    ).to(device=parameter.device, dtype=parameter.dtype)
+
+    sigma = 255.0 / delta
+    scale = sigma_ref / sigma
+    model_input = z_tensor * scale
+    restored = vn(model_input, model_input)[-1] / scale
+    x = restored[0].cpu().numpy().transpose(1, 2, 0)
     d = x * delta + a_min
 
-    if unbiased: x_counts = anscombe_inv_unbiased(d)
-    else: x_counts = anscombe_inv(d)
+    if unbiased:
+        x_counts = anscombe_inv_unbiased(d)
+    else:
+        x_counts = anscombe_inv(d)
 
-    return np.clip(x_counts / peak, 0.0, 1.0)
+    return np.clip(x_counts / peak, 0.0, 1.0).astype(np.float32)
 
 
-
-def load_poisson_model(color='gray', peak = 1):
-    _, checkpoint_poisson = load_model(color)
-    config_poisson = checkpoint_poisson['config']
-    config_poisson['D']['type'] = 'poisson'
-    config_poisson['D']['config']['use_prox'] = False
-
-    vn_poisson = model.VNet(config_poisson, efficient=False)
-    vn_poisson.load_state_dict(checkpoint_poisson['model'], strict=True)
-
-    with torch.no_grad():
-        vn_poisson.lmbda.mul_(peak) # scaling (peak)
-
-    return vn_poisson.to(DEVICE).eval()
-
-def denoise_poisson_fidelity(z, vn):
-    z, color = check_color(np.asarray(z, dtype=np.float32))
-    if vn is None: vn = load_poisson_model(color)
-    return denoise_z(vn=vn, z=z, scaled=False)

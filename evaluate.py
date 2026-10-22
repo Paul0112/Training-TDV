@@ -22,7 +22,7 @@ from ddr.data import ImageDataset2D, add_noise, add_poisson_noise, psnr
 from ddr.data3d import UMBRAL_TEJIDO
 from ddr.model import VNet2D, VNet3D
 from ddr.qsm3d import nrmse_pct
-from poisson_methods import anscombe, anscombe_inv, anscombe_inv_unbiased, denoise_anscombe, load_poisson_model, denoise_poisson_fidelity
+from poisson_methods import denoise_anscombe
 
 __all__ = ["load_vnet", "evaluate_denoising", "evaluate_denoising3d"]
 
@@ -60,7 +60,7 @@ def evaluate_denoising(model, dataset, sigma=25.0, sigma_ref=25.0, device="cpu",
             denoised = model(noisy * scale, noisy * scale)[-1] / scale
         else:
             z = noisy[0].permute(1, 2, 0).cpu().numpy()
-            x = denoise_anscombe(z, peak=poisson_peak, vn=model, unbiased=(anscombe_mode == "unbiased"))
+            x = denoise_anscombe(z, peak=poisson_peak, vn=model, unbiased=(anscombe_mode == "unbiased"), sigma_ref=sigma_ref)
 
             denoised = (
                 torch.from_numpy(np.ascontiguousarray(x))
