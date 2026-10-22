@@ -22,6 +22,7 @@ from ddr.data import ImageDataset2D, add_noise, add_poisson_noise, psnr
 from ddr.data3d import UMBRAL_TEJIDO
 from ddr.model import VNet2D, VNet3D
 from ddr.qsm3d import nrmse_pct
+from poisson_methods import anscombe, anscombe_inv, anscombe_inv_unbiased, denoise_anscombe, load_poisson_model, denoise_poisson_fidelity
 
 __all__ = ["load_vnet", "evaluate_denoising", "evaluate_denoising3d"]
 
