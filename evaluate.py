@@ -40,8 +40,10 @@ def load_vnet(path, device="cpu", efficient: bool = False) -> tuple[VNet2D | VNe
 
 @torch.no_grad()
 def evaluate_denoising(model, dataset, sigma=25.0, sigma_ref=25.0, device="cpu",
-                       seed=1234, data_range=1.0, noise_scale=255.0, noise_type='gaussian', poisson_peak=100.0) -> dict:
+                       seed=1234, data_range=1.0, noise_scale=255.0, noise_type='gaussian', poisson_peak=100.0, anscombe_mode='none') -> dict:
     """PSNR promedio sobre `dataset`, con una realización de ruido fija (gaussiana o poisson) por imagen."""
+
+        
     scale = (sigma_ref / sigma) if noise_type == "gaussian" else 1.0 # esto hay que cambiarlo para hacer inferencia sobre la correspondencia sigma -> peak
     rows = []
     for i in range(len(dataset)):
@@ -52,7 +54,22 @@ def evaluate_denoising(model, dataset, sigma=25.0, sigma_ref=25.0, device="cpu",
         if noise_type == 'poisson': noisy = add_poisson_noise(clean.cpu(), peak=poisson_peak, generator=gen).to(device)
         else: noisy = add_noise(clean.cpu(), sigma, gen, noise_scale).to(device)
 
-        denoised = model(noisy * scale, noisy * scale)[-1] / scale
+        #denoised = model(noisy * scale, noisy * scale)[-1] / scale
+
+        if anscombe_mode == "none":
+            denoised = model(noisy * scale, noisy * scale)[-1] / scale
+        else:
+            z = noisy[0].permute(1, 2, 0).cpu().numpy()
+            x = denoise_anscombe(z, peak=poisson_peak, vn=model, unbiased=(anscombe_mode == "unbiased"))
+
+            denoised = (
+                torch.from_numpy(np.ascontiguousarray(x))
+                .permute(2, 0, 1)
+                .unsqueeze(0)
+                .to(device=noisy.device, dtype=noisy.dtype)
+            )
+        
+        
         rows.append({
             "name": name,
             "psnr_noisy": psnr(noisy, clean, data_range),
@@ -63,6 +80,7 @@ def evaluate_denoising(model, dataset, sigma=25.0, sigma_ref=25.0, device="cpu",
         "noise_type": noise_type,
         "sigma": sigma if noise_type == "gaussian" else None,
         "poisson_peak": poisson_peak if noise_type == "poisson" else None,
+        "anscombe": anscombe_mode,
         "num_images": len(rows),
         "psnr_noisy": float(np.mean([r["psnr_noisy"] for r in rows])),
         "psnr_denoised": float(np.mean([r["psnr_denoised"] for r in rows])),
@@ -141,7 +159,9 @@ def main() -> None:
     p.add_argument("--output", help="escribir el reporte JSON acá")
     p.add_argument("--noise-type", choices=["gaussian", "poisson"], default="gaussian",help="Tipo de ruido con el que degradar las imágenes de prueba")
     p.add_argument("--poisson-peak", type=float, default=100.0, help="Fotones peak si se usa ruido Poisson")
+    p.add_argument("--anscombe", choices=["none", "biased", "unbiased"], default="none",  help="Inversa de Anscombe para evaluar ruido Poisson")
     args = p.parse_args()
+
 
     names = None
     if args.file_list:
@@ -150,9 +170,10 @@ def main() -> None:
     dataset = ImageDataset2D.from_root(args.data, args.split,
                                        channels=1 if args.gray else 3, names=names)
     model, config = load_vnet(args.checkpoint, args.device)
-    report = evaluate_denoising(model, dataset, args.sigma, args.sigma_ref, args.device, noise_type=args.noise_type, poisson_peak=args.poisson_peak)
+    report = evaluate_denoising(model, dataset, args.sigma, args.sigma_ref, args.device, noise_type=args.noise_type, poisson_peak=args.poisson_peak, anscombe_mode=args.anscombe)
 
     print(f"checkpoint : {args.checkpoint}")
+    print(f"Anscombe   : {args.anscombe}")
     print(f"conjunto   : {args.split} ({report['num_images']} imágenes)")
     if args.noise_type == "poisson":
         print(f"ruido   : Poisson (peak={args.poisson_peak})")

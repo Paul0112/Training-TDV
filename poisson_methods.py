@@ -3,7 +3,6 @@ from tdv import model
 from tdv.denoise_utils import check_color, denoise_z, load_model, DEVICE
 import torch
 
-
 """
 Biased asncombe transform (fails at peaks << 50)
 
@@ -21,20 +20,22 @@ def anscombe_inv(d):
     return (d / 2.0)**2 - 3.0 / 8.0
 
 
-def anscombe_inv_unbiased(d):
-  """Inversa insesgada asintótica de Anscombe (Mäkitalo & Foi, 2011).
-  A diferencia de (d/2)^2 - 3/8, elimina el sesgo en cuentas bajas y medias.
-  """
-  # El valor mínimo teórico en Anscombe es 2*sqrt(3/8) ~ 1.22474487
-  d_safe = np.maximum(d, 2.0 * np.sqrt(3.0 / 8.0))
 
-  return (
-      0.25 * (d_safe**2)
-      + 0.25 * np.sqrt(1.5) * (d_safe ** (-1))
-      - (11.0 / 8.0) * (d_safe ** (-2))
-      + (5.0 / 8.0) * np.sqrt(1.5) * (d_safe ** (-3))
-      - 0.125
-  )
+def anscombe_inv_unbiased(d):
+    """Inverse Anscombe (Mäkitalo & Foi)."""
+    threshold = 2.0 * np.sqrt(3.0 / 8.0)
+    d_safe = np.maximum(d, threshold)
+
+    x = (
+        0.25 * (d_safe**2)
+        + 0.25 * np.sqrt(1.5) * (d_safe ** (-1))
+        - (11.0 / 8.0) * (d_safe ** (-2))
+        + (5.0 / 8.0) * np.sqrt(1.5) * (d_safe ** (-3))
+        - 0.125
+    )
+    return np.where(d > threshold, np.maximum(x, 0.0), 0.0)
+
+
 
 
 def denoise_anscombe(z, peak, vn, unbiased= True):
