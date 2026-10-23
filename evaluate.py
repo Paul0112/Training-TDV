@@ -23,6 +23,8 @@ from ddr.data3d import UMBRAL_TEJIDO
 from ddr.model import VNet2D, VNet3D
 from ddr.qsm3d import nrmse_pct
 from poisson_methods import denoise_anscombe
+from skimage.metrics import structural_similarity
+
 
 __all__ = ["load_vnet", "evaluate_denoising", "evaluate_denoising3d"]
 
@@ -36,6 +38,20 @@ def load_vnet(path, device="cpu", efficient: bool = False) -> tuple[VNet2D | VNe
     model = vnet(ck["config"], efficient=efficient)
     model.load_state_dict(ck["model"], strict=True)
     return model.to(device).eval(), ck["config"]
+
+
+
+
+def tensor_ssim(x, y, data_range=1.0):
+    # El evaluador procesa una imagen NCHW por vez.
+    x = x[0].detach().float().cpu().permute(1, 2, 0).numpy()
+    y = y[0].detach().float().cpu().permute(1, 2, 0).numpy()
+
+    return float(structural_similarity(
+        x, y,
+        data_range=data_range,
+        channel_axis=-1,
+    ))
 
 
 @torch.no_grad()
@@ -69,11 +85,12 @@ def evaluate_denoising(model, dataset, sigma=25.0, sigma_ref=25.0, device="cpu",
                 .to(device=noisy.device, dtype=noisy.dtype)
             )
         
-        
         rows.append({
             "name": name,
             "psnr_noisy": psnr(noisy, clean, data_range),
             "psnr_denoised": psnr(denoised, clean, data_range),
+            "ssim_noisy": tensor_ssim(noisy, clean, data_range),
+            "ssim_denoised": tensor_ssim(denoised, clean, data_range)
         })
 
     return {
@@ -84,6 +101,8 @@ def evaluate_denoising(model, dataset, sigma=25.0, sigma_ref=25.0, device="cpu",
         "num_images": len(rows),
         "psnr_noisy": float(np.mean([r["psnr_noisy"] for r in rows])),
         "psnr_denoised": float(np.mean([r["psnr_denoised"] for r in rows])),
+        "ssim_noisy": float(np.mean([r["ssim_noisy"] for r in rows])),
+        "ssim_denoised": float(np.mean([r["ssim_denoised"] for r in rows])),
         "per_image": rows,
     }
 
@@ -181,6 +200,8 @@ def main() -> None:
         print(f"sigma   : {args.sigma}   S={config['S']}")
     print(f"PSNR ruido : {report['psnr_noisy']:.2f} dB")
     print(f"PSNR salida: {report['psnr_denoised']:.2f} dB")
+    print(f"SSIM ruido : {report['ssim_noisy']:.4f}")
+    print(f"SSIM salida: {report['ssim_denoised']:.4f}")
 
     if args.output:
         report["checkpoint"] = str(args.checkpoint)
