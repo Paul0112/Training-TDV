@@ -53,10 +53,21 @@ class PoissonDenoiseDataterm(torch.nn.Module):
         x_s = torch.clamp(x, min=1e-6)
         return x_s - z * torch.log(x_s)
 
+    """
     def prox(self, x: torch.Tensor, z: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
         b = x - tau
         d = torch.clamp(b * b + 4.0 * tau * z, min=1e-8)
         return 0.5 * (b + torch.sqrt(d))
+    """
+
+    # test new prox
+    def prox(self, x: torch.Tensor, z: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
+        x_pos = torch.clamp(x, min=1e-4)
+        b = x_pos - tau
+        d = torch.clamp(b * b + 4.0 * tau * z, min=1e-5)
+        out = 0.5 * (b + torch.sqrt(d))
+
+        return torch.clamp(out, min=1e-4)
 
     def grad(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         x_s = torch.clamp(x, min=1e-6)
@@ -109,7 +120,7 @@ class VNet2D(torch.nn.Module):
         p.proj = lambda: p.data.clamp_(lo, hi)
         return p
 
-    def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, z: torch.Tensor, peak: float | None = None) -> torch.Tensor:
         """Devuelve todos los estados `[x_0, ..., x_S]` apilados en la dimensión 0.
 
         La pérdida se evalúa sólo en `x_S`; los intermedios sirven para diagnóstico.
@@ -117,6 +128,11 @@ class VNet2D(torch.nn.Module):
         x_all = x.new_empty((self.S + 1, *x.shape))
         x_all[0] = x
         tau = self.T / self.S
+
+        tau_D = self.lmbda / self.S # SCALED TAU
+        if peak is not None and isinstance(self.D, PoissonDenoiseDataterm):
+            tau_D = tau_D * peak
+
 
         for s in range(1, self.S + 1):
             x = x.contiguous()
@@ -127,9 +143,9 @@ class VNet2D(torch.nn.Module):
                 grad_R = self.R.grad(x)
 
             if self.use_prox:
-                x = self.D.prox(x - tau * grad_R.contiguous(), z, self.lmbda / self.S)
+                x = self.D.prox(x - tau * grad_R.contiguous(), z, tau_D)
             else:
-                x = x - tau * grad_R - (self.lmbda / self.S) * self.D.grad(x, z)
+                x = x - tau * grad_R - (tau_D) * self.D.grad(x, z)
             x_all[s] = x
 
         return x_all

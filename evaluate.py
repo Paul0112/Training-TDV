@@ -73,7 +73,9 @@ def evaluate_denoising(model, dataset, sigma=25.0, sigma_ref=25.0, device="cpu",
         #denoised = model(noisy * scale, noisy * scale)[-1] / scale
 
         if anscombe_mode == "none":
-            denoised = model(noisy * scale, noisy * scale)[-1] / scale
+            #denoised = model(noisy * scale, noisy * scale)[-1] / scale
+            p_eval = poisson_peak if noise_type == "poisson" else None
+            denoised = model(noisy * scale, noisy * scale, peak=p_eval)[-1] / scale
         else:
             z = noisy[0].permute(1, 2, 0).cpu().numpy()
             x = denoise_anscombe(z, peak=poisson_peak, vn=model, unbiased=(anscombe_mode == "unbiased"), sigma_ref=sigma_ref)

@@ -54,7 +54,9 @@ T_INIT = 8 * DELTA_ADAM # Cercano a 0.1
 # `ITERATIONS` es la receta publicada y no se toca. Las tandas de trabajo corren 10k: con T en
 # 10 delta la PSNR llega a su mejor valor antes de la it 5000 y los eventos caen antes de la 4500.
 ITERACIONES_TANDA = 10_000
-LAMBDA_INIT = 0.1
+#LAMBDA_INIT = 0.1
+LAMBDA_INIT = 0.002 # prueba para poisson
+
 
 # --- DISYUNTOR DE LOTES ----------------------------------------------------------------------
 # Dos pruebas con trabajos distintos y un rebobinado para cuando las dos llegan tarde. Cada
@@ -202,8 +204,14 @@ def main() -> None:
                    help="modelo de ruido: gaussian (default) o poisson")
     p.add_argument("--poisson-peak", type=float, default=100.0,
                    help="peak de fotones para ruido Poisson (ej. 30, 50, 100)")
+
+    # # #
+    p.add_argument("--poisson-peak-min", type=float, default=0.0,
+                   help="> 0 sortea peak ~ LogUniform(min, max) por micro-lote")
+    p.add_argument("--poisson-peak-max", type=float, default=0.0)
+    # # #
     p.add_argument("--dataterm", choices=["denoise", "poisson"], default="denoise",
-               help="Término de fidelidad de datos: denoise (L2 gaussiano) o poisson")
+                   help="Término de fidelidad de datos: denoise (L2 gaussiano) o poisson")
     
     args = p.parse_args()
     if args.sigma_max > 0 and not 0 <= args.sigma_min <= args.sigma_max:
@@ -303,7 +311,16 @@ def main() -> None:
             clean = lote.to(device, non_blocking=True)
 
             if args.noise_type == 'poisson':
-                noisy = add_poisson_noise(clean, peak=args.poisson_peak, generator=noise_gen)
+                if args.poisson_peak_max > 0:
+                    # peaks randoms
+                    u = float(torch.rand(1, generator=noise_gen).item())
+                    log_min = math.log10(args.poisson_peak_min)
+                    log_max = math.log10(args.poisson_peak_max)
+                    current_peak = 10.0 ** (log_min + u * (log_max - log_min))
+                else:
+                    current_peak = args.poisson_peak
+                noisy = add_poisson_noise(clean, peak=current_peak, generator=noise_gen)
+
             elif args.sigma_max > 0:
                 noisy = add_noise_ciego(clean, args.sigma_min, args.sigma_max, noise_gen, NOISE_SCALE)[0]
             else:
@@ -315,7 +332,8 @@ def main() -> None:
                 noisy.requires_grad_(True)
 
             with torch.autocast(device.type, dtype=mode["amp"], enabled=mode["amp"] is not None):
-                states = model(noisy, noisy)
+                #states = model(noisy, noisy)
+                states = model(noisy, noisy, peak=current_peak if args.noise_type == 'poisson' else None)
                 loss = (states[-1].float() - clean.float()).pow(2).flatten(1).sum(1).mean()
 
             (loss / ACUMULACION).backward()
