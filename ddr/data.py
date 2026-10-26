@@ -100,15 +100,13 @@ def add_noise(y: torch.Tensor, sigma: float, generator=None, noise_scale: float 
 
 def add_poisson_noise(y: torch.Tensor, peak: float = 100.0, generator= None):
     """
-    Ruido de Poisson fijando un 'peak' que simula el valor maximo de intensidad para una imagen
-    normalizada. 
+    Conteos Poisson normalizados por peak
     """
-    #mean = y * peak
     mean = torch.clamp(y, min=0.0) * peak
     poisson_photons = torch.poisson(mean, generator=generator)
     noisy_img = poisson_photons / peak
     
-    return torch.clamp(noisy_img, 0.0, 1.0)
+    return noisy_img
 
 def psnr(x, y, data_range: float = 1.0) -> float:
     if isinstance(x, torch.Tensor):

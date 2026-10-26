@@ -53,21 +53,18 @@ class PoissonDenoiseDataterm(torch.nn.Module):
         x_s = torch.clamp(x, min=1e-6)
         return x_s - z * torch.log(x_s)
 
-    """
     def prox(self, x: torch.Tensor, z: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
         b = x - tau
-        d = torch.clamp(b * b + 4.0 * tau * z, min=1e-8)
-        return 0.5 * (b + torch.sqrt(d))
-    """
-
-    # test new prox
-    def prox(self, x: torch.Tensor, z: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
-        x_pos = torch.clamp(x, min=1e-4)
-        b = x_pos - tau
-        d = torch.clamp(b * b + 4.0 * tau * z, min=1e-5)
-        out = 0.5 * (b + torch.sqrt(d))
-
-        return torch.clamp(out, min=1e-4)
+        d = b.square() + 4.0 * tau * z
+        # La raíz en d=0 no es diferenciable: elegimos derivada cero allí.
+        positive = d > 0
+        root = torch.sqrt(torch.where(positive, d, torch.ones_like(d)))
+        root = torch.where(positive, root, torch.zeros_like(root))
+        
+        # Racionalizar la rama b<0 evita restar dos números casi iguales.
+        denominator = torch.where(b < 0, root - b, torch.ones_like(root))
+        out = torch.where(b < 0, 2.0 * tau * z / denominator, 0.5 * (b + root))
+        return torch.where(z == 0, torch.relu(b), out)
 
     def grad(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         x_s = torch.clamp(x, min=1e-6)
@@ -124,15 +121,13 @@ class VNet2D(torch.nn.Module):
         """Devuelve todos los estados `[x_0, ..., x_S]` apilados en la dimensión 0.
 
         La pérdida se evalúa sólo en `x_S`; los intermedios sirven para diagnóstico.
+        `peak` se conserva por compatibilidad de llamadas; lambda absorbe su escala fija.
         """
         x_all = x.new_empty((self.S + 1, *x.shape))
         x_all[0] = x
         tau = self.T / self.S
 
-        tau_D = self.lmbda / self.S # SCALED TAU
-        if peak is not None and isinstance(self.D, PoissonDenoiseDataterm):
-            tau_D = tau_D * peak
-
+        tau_D = self.lmbda / self.S
 
         for s in range(1, self.S + 1):
             x = x.contiguous()

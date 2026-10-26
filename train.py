@@ -54,8 +54,7 @@ T_INIT = 8 * DELTA_ADAM # Cercano a 0.1
 # `ITERATIONS` es la receta publicada y no se toca. Las tandas de trabajo corren 10k: con T en
 # 10 delta la PSNR llega a su mejor valor antes de la it 5000 y los eventos caen antes de la 4500.
 ITERACIONES_TANDA = 10_000
-#LAMBDA_INIT = 0.1
-LAMBDA_INIT = 0.002 # prueba para poisson
+LAMBDA_INIT = 0.1
 
 
 # --- DISYUNTOR DE LOTES ----------------------------------------------------------------------
@@ -87,7 +86,7 @@ MODES = {
 
 def vnet_config(t_init: float, channels: int = CHANNELS, dataterm: str = 'denoise') -> dict:
     """Config de la VNet, verificada contra los .pth oficiales."""
-    return {
+    config = {
         "S": STEPS,
         "R": {"type": "tdv", "config": {
             "in_channels": channels, "out_channels": 1,
@@ -98,6 +97,9 @@ def vnet_config(t_init: float, channels: int = CHANNELS, dataterm: str = 'denois
         "T_mode": "learned", "T": {"init": t_init, "min": 0.0, "max": 1000.0},
         "lambda_mode": "learned", "lambda": {"init": LAMBDA_INIT, "min": 0.0, "max": 1000.0},
     }
+    if dataterm == "poisson":
+        config["D"]["config"].update(prox_variant="stable_exact_v1", peak_scaling="none")
+    return config
 
 
 def rechaza_lote(gnorm: float, amp: float, escala: list[float], ratio: float, abs_max: float,
@@ -217,6 +219,13 @@ def main() -> None:
     if args.sigma_max > 0 and not 0 <= args.sigma_min <= args.sigma_max:
         p.error(f"--sigma-min {args.sigma_min:g} tiene que estar en [0, --sigma-max "
                 f"{args.sigma_max:g}]")
+    if not math.isfinite(args.poisson_peak) or args.poisson_peak <= 0:
+        p.error("--poisson-peak debe ser positivo y finito")
+    if args.poisson_peak_min != 0 or args.poisson_peak_max != 0:
+        if not 0 < args.poisson_peak_min <= args.poisson_peak_max < math.inf:
+            p.error("los límites de peak deben cumplir 0 < min <= max < inf")
+        if args.dataterm == "poisson":
+            p.error("P-P usa peak fijo y lambda sin escalado; deja ambos límites en 0")
 
     mode = MODES[args.mode]
     out = Path(args.out)
@@ -238,6 +247,9 @@ def main() -> None:
 
     # --- MODELO -------------------------------------------------------------------------------
     config = vnet_config(args.t_init, args.channels, dataterm=args.dataterm)
+    if args.noise_type == "poisson":
+        config["observation"] = {"noise_type": "poisson", "peak": args.poisson_peak,
+                                 "clip_noisy": False}
     model = VNet2D(config, efficient=args.checkpointing).to(device)
     # Se compila el MÉTODO R.grad, no el módulo: `forward` no lo invoca nadie en el bucle, así que
     # compilar el módulo es un no-op silencioso. Compilar el método además deja el state_dict sin
@@ -313,7 +325,7 @@ def main() -> None:
             if args.noise_type == 'poisson':
                 if args.poisson_peak_max > 0:
                     # peaks randoms
-                    u = float(torch.rand(1, generator=noise_gen).item())
+                    u = float(torch.rand(1, device=device, generator=noise_gen).item())
                     log_min = math.log10(args.poisson_peak_min)
                     log_max = math.log10(args.poisson_peak_max)
                     current_peak = 10.0 ** (log_min + u * (log_max - log_min))
