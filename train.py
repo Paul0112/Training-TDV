@@ -309,6 +309,23 @@ def main() -> None:
     # loss T dT lambda dlambda |g| centro amp rechazado rebobinado
     # La 7 es `amp` igual que en las trazas de 30 columnas de `scripts/measure_traza_adjunta.py`,
     # así que `traza[:, 7]` significa lo mismo en los dos formatos.
+    # DEBUG-5
+    def resumen(t):
+        t = t.detach().float()
+        return dict(media=t.mean().item(), minimo=t.amin().item(), maximo=t.amax().item(),
+                    ceros=(t == 0).float().mean().item(), no_finitos=(~t.isfinite()).sum().item())
+    def observar(nombre, t, backward=True):
+        if nombre == "x_in":
+            etapas.append({})
+        fila = etapas[-1]
+        fila[nombre] = resumen(t)
+        if backward and t.requires_grad:
+            def guardar(g):
+                g = g.detach().float()
+                fila["grad_" + nombre] = dict(norma=g.norm().item(), max_abs=g.abs().amax().item())
+            t.register_hook(guardar)
+    ruta_debug = out / "diagnostico.jsonl"
+    ruta_debug.touch(exist_ok=False)
     lotes = iter(loader)
 
     for it in range(1, args.iterations + 1):
@@ -317,6 +334,8 @@ def main() -> None:
         opt.zero_grad(set_to_none=True)
         perdida = torch.zeros((), device=device)
         p0, pS = torch.zeros((), device=device), torch.zeros((), device=device)
+        # DEBUG-6
+        micros = []
         for _ in range(ACUMULACION):
             # El ruido se suma en CPU antes de subir: una transferencia por tensor en vez de tres.
             lote = next(lotes)
@@ -340,6 +359,11 @@ def main() -> None:
 
             # Materializar `dL/dx_0` cuesta un vjp más por el paso 0. Medido el 2026-10-03
             # sobre 120 iteraciones en `referencia`: no mueve la trayectoria ni un bit.
+            # DEBUG-7
+            etapas = []
+            micros.append(dict(clean=resumen(clean), noisy=resumen(noisy), etapas=etapas,
+                               mse_ruido=(noisy - clean).square().mean().item()))
+            model.D.observe = observar
             if mide_amp:
                 noisy.requires_grad_(True)
 
@@ -349,6 +373,8 @@ def main() -> None:
                 loss = (states[-1].float() - clean.float()).pow(2).flatten(1).sum(1).mean()
 
             (loss / ACUMULACION).backward()
+            # DEBUG-8
+            del model.D.observe
             perdida += loss.detach() / ACUMULACION
             # `forward` devuelve los estados APILADOS, así que `states[-1]` es una vista nueva en
             # cada indexado y `retain_grad` se le pegaría a un temporal. No hace falta: de la
@@ -359,6 +385,10 @@ def main() -> None:
                     MICRO_BATCH * ACUMULACION ** 2)
 
         # Devuelve la norma ANTES de recortar, que es la que sirve de diagnóstico.
+        # DEBUG-9
+        antes = {n: p.detach().clone() for n, p in model.named_parameters()}
+        grad = {n: p.grad.detach().float().norm().item()
+                for n, p in model.named_parameters() if p.grad is not None}
         gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip).item()
 
         amp = (p0 / pS).item() if mide_amp else float("nan")
@@ -376,6 +406,10 @@ def main() -> None:
         sched.step()
         model.project_()   # media cero y norma <=1 en K1, positividad de T y lambda
 
+        # DEBUG-10
+        cambio = {n: (p.detach() - antes[n]).float().norm().item()
+                  for n, p in model.named_parameters()}
+        del antes
         # Rechazar llega tarde cuando los pesos ya están en la cuenca mala: `‖g‖` se mide en los
         # pesos de ahora, así que dice dónde está la corrida, no a dónde la lleva el paso. El
         # rebobinado es la única salida que no corta el bucle, y cortarlo invertiría la censura.
@@ -404,6 +438,14 @@ def main() -> None:
                 respaldo, it_respaldo = respalda(model, opt, escala), it
 
         traza[it - 1, 5:] = (gnorm, centro, amp, rechazado, rebobinado)
+        # DEBUG-11
+        registro = dict(it=it, micros=micros, loss=perdida.item(), norma=gnorm,
+                        grad=grad, cambio_tras_proyeccion=cambio, rechazo=bool(rechazado),
+                        rebobinado=bool(rebobinado))
+        with ruta_debug.open("a", encoding="utf-8") as archivo:
+            archivo.write(json.dumps(registro) + "\n")
+        if rechazado or it % 50 == 0:
+            print(f"[debug {it}] norma={gnorm:.3g} rechazo={rechazado}", flush=True)
         max_grad = max(max_grad, gnorm)
 
         if it % args.log_every == 0:

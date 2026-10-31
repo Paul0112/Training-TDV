@@ -37,6 +37,9 @@ class L2DenoiseDataterm(torch.nn.Module):
         return 0.5 * (x - z) ** 2
 
     def prox(self, x: torch.Tensor, z: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
+        # DEBUG-1
+        if hasattr(self, "observe"):
+           self.observe("v", x)
         return (x + tau * z) / (1 + tau)
 
     def grad(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
@@ -54,16 +57,19 @@ class PoissonDenoiseDataterm(torch.nn.Module):
         return x_s - z * torch.log(x_s)
 
     def prox(self, x: torch.Tensor, z: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
+        # DEBUG-2
+        if hasattr(self, "observe"):
+            self.observe("v", x)
         b = x - tau
         d = b.square() + 4.0 * tau * z
-        # La raíz en d=0 no es diferenciable: elegimos derivada cero allí.
+
+        # casos borde
         positive = d > 0
         root = torch.sqrt(torch.where(positive, d, torch.ones_like(d)))
         root = torch.where(positive, root, torch.zeros_like(root))
-        
-        # Racionalizar la rama b<0 evita restar dos números casi iguales.
         denominator = torch.where(b < 0, root - b, torch.ones_like(root))
         out = torch.where(b < 0, 2.0 * tau * z / denominator, 0.5 * (b + root))
+
         return torch.where(z == 0, torch.relu(b), out)
 
     def grad(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
@@ -137,10 +143,17 @@ class VNet2D(torch.nn.Module):
             else:
                 grad_R = self.R.grad(x)
 
+            # DEBUG-3
+            if hasattr(self.D, "observe"):
+                self.D.observe("x_in", x, backward=False)
+                self.D.observe("paso_R", tau.detach() * grad_R.detach(), backward=False)
             if self.use_prox:
                 x = self.D.prox(x - tau * grad_R.contiguous(), z, tau_D)
             else:
                 x = x - tau * grad_R - (tau_D) * self.D.grad(x, z)
+            # DEBUG-4
+            if hasattr(self.D, "observe"):
+                self.D.observe("x_out", x)
             x_all[s] = x
 
         return x_all
