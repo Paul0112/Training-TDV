@@ -17,11 +17,19 @@ import torch
 ROOT = Path(__file__).resolve().parent
 
 
-def medir(model, muestra, steps, acumulacion, device):
+def medir(model, muestra, steps, acumulacion, device, micro_batch=4):
     """La loss se suma por imagen, igual que en train.py."""
     model.S = steps
     model.zero_grad(set_to_none=True)
     etapas = []
+    if micro_batch < 1 or acumulacion < 1:
+        raise ValueError("micro_batch y acumulacion deben ser positivos.")
+    total = muestra["clean"].shape[0]
+    if total == 0 or muestra["clean"].shape != muestra["noisy"].shape:
+        raise ValueError("Se requieren clean/noisy del mismo tamaño y un lote no vacío.")
+    combinadas = [{"etapa": s + 1, "grad_v": {"norma": 0., "max_abs": 0.},
+                   "grad_x_out": {"norma": 0., "max_abs": 0.}} for s in range(steps)]
+    perdida = 0.0
 
     def observar(nombre, tensor, backward=True):
         if nombre == "x_in":
@@ -40,26 +48,40 @@ def medir(model, muestra, steps, acumulacion, device):
         if tensor.requires_grad:
             tensor.register_hook(guardar)
 
-    clean = muestra["clean"].to(device)
-    noisy = muestra["noisy"].to(device)
     model.D.observe = observar
     try:
-        ultimo = model(noisy, noisy)[-1]
-        loss = (ultimo.float() - clean.float()).square().flatten(1).sum(1).mean()
-        (loss / acumulacion).backward()
+        for inicio in range(0, total, micro_batch):
+            etapas = []
+            clean = muestra["clean"][inicio:inicio + micro_batch].to(device)
+            noisy = muestra["noisy"][inicio:inicio + micro_batch].to(device)
+            ultimo = model(noisy, noisy)[-1]
+            # El denominador es el lote original, incluso para el último trozo.
+            loss = (ultimo.float() - clean.float()).square().sum() / total
+            (loss / acumulacion).backward()
+            perdida += loss.item()
+            if len(etapas) != steps or any("grad_v" not in e or "grad_x_out" not in e for e in etapas):
+                raise RuntimeError("Faltan hooks DEBUG en Training-TDV/ddr/model.py.")
+            for acumulada, etapa in zip(combinadas, etapas):
+                for nombre in ("grad_v", "grad_x_out"):
+                    valores = etapa[nombre]
+                    if not all(math.isfinite(v) for v in valores.values()):
+                        raise RuntimeError(f"Gradientes no finitos con S={steps}.")
+                    # Norma del tensor concatenado: raíz de la suma de cuadrados.
+                    acumulada[nombre]["norma"] = math.hypot(acumulada[nombre]["norma"], valores["norma"])
+                    acumulada[nombre]["max_abs"] = max(acumulada[nombre]["max_abs"], valores["max_abs"])
+            del ultimo, loss, clean, noisy
     finally:
         del model.D.observe
-    if len(etapas) != steps or any("grad_v" not in e or "grad_x_out" not in e for e in etapas):
-        raise RuntimeError("Faltan hooks DEBUG en Training-TDV/ddr/model.py.")
+    etapas = combinadas
     gx = [e["grad_x_out"]["norma"] for e in etapas]
-    if not math.isfinite(loss.item()) or not all(
+    if not math.isfinite(perdida) or not all(
         math.isfinite(value) for e in etapas
         for name in ("grad_v", "grad_x_out") for value in e[name].values()
     ):
         raise RuntimeError(f"Salida o gradientes no finitos con S={steps}.")
     return dict(S=steps, T=model.T.item(), lmbda=model.lmbda.item(),
                 h=model.T.item()/steps, tau_D=model.lmbda.item()/steps,
-                loss=loss.item(), amplificacion=gx[0]/gx[-1] if gx[-1] > 0 else None,
+                loss=perdida, amplificacion=gx[0]/gx[-1] if gx[-1] > 0 else None,
                 etapas=etapas)
 
 
@@ -74,8 +96,12 @@ def main():
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--sin-compilar", action="store_true",
                         help="usa R.grad eager; por defecto se compila en CUDA como en entrenamiento")
+    parser.add_argument("--micro-batch", type=int, default=4,
+                        help="imágenes simultáneas para limitar la memoria (default: 4)")
     parser.add_argument("--output", type=Path, default=ROOT / "runs/sensibilidad_s.json")
     args = parser.parse_args()
+    if args.micro_batch < 1:
+        parser.error("--micro-batch debe ser positivo.")
     if not all(p.is_file() for p in args.capturas):
         parser.error("Falta alguno de los archivos evento_paso.pth.")
     sys.path.insert(0, str(ROOT))
@@ -89,6 +115,7 @@ def main():
     torch.backends.cuda.matmul.fp32_precision = "ieee"
     compilado = args.device == "cuda" and not args.sin_compilar
     reporte = dict(device=args.device, torch=torch.__version__, compilado=compilado,
+                   micro_batch=args.micro_batch,
                    training_repo=str(ROOT),
                    medicion="norma dL/dx1 dividida por norma dL/dxS; dirección de la loss",
                    control="datos previamente aceptados, evaluados con pesos del evento",
@@ -108,7 +135,7 @@ def main():
             if muestra is None:
                 continue
             for steps in (10, 20):
-                fila = medir(model, muestra, steps, captura["acumulacion"], args.device)
+                fila = medir(model, muestra, steps, captura["acumulacion"], args.device, args.micro_batch)
                 fila.update(captura=str(path.resolve()), tipo=tipo,
                             it=muestra["it"], micro=muestra["micro"])
                 if tipo == "evento" and steps == 10:
