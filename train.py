@@ -202,6 +202,9 @@ def main() -> None:
                    help="recomputa el forward en el backward: -78%% de memoria, +31%% de tiempo")
 
     # modificaciones para ruido poisson
+    # DEBUG-12
+    p.add_argument("--capturar-paso", action="store_true",
+                   help="captura el rechazo más amplificado y compara tres pasos de TDV al terminar")
     p.add_argument("--noise-type", choices=["gaussian", "poisson"], default="gaussian",
                    help="modelo de ruido: gaussian (default) o poisson")
     p.add_argument("--poisson-peak", type=float, default=100.0,
@@ -326,6 +329,10 @@ def main() -> None:
             t.register_hook(guardar)
     ruta_debug = out / "diagnostico.jsonl"
     ruta_debug.touch(exist_ok=False)
+    # DEBUG-13
+    control_previo = None
+    mayor_amplificacion = 1.0
+    ruta_evento = out / "evento_paso.pth"
     lotes = iter(loader)
 
     for it in range(1, args.iterations + 1):
@@ -336,6 +343,8 @@ def main() -> None:
         p0, pS = torch.zeros((), device=device), torch.zeros((), device=device)
         # DEBUG-6
         micros = []
+        if args.capturar_paso:
+            muestras = []
         for _ in range(ACUMULACION):
             # El ruido se suma en CPU antes de subir: una transferencia por tensor en vez de tres.
             lote = next(lotes)
@@ -373,6 +382,11 @@ def main() -> None:
                 loss = (states[-1].float() - clean.float()).pow(2).flatten(1).sum(1).mean()
 
             (loss / ACUMULACION).backward()
+            # DEBUG-14
+            if args.capturar_paso:
+                muestras.append(dict(it=it, micro=len(muestras) + 1, clean=clean.detach(),
+                                     noisy=noisy.detach(), loss=loss.item(),
+                                     grad_x=[e["grad_x_out"]["norma"] for e in etapas]))
             # DEBUG-8
             del model.D.observe
             perdida += loss.detach() / ACUMULACION
@@ -401,6 +415,23 @@ def main() -> None:
 
         # El lote rechazado no da el paso, y por eso el pico no entra en `m` ni en `v`. El resto
         # sigue: el lote ya se consumió, así que el calendario del lr no se detiene.
+        # DEBUG-15
+        if args.capturar_paso:
+            if rechazado:
+                for muestra in muestras:
+                    gx = muestra["grad_x"]
+                    razon = gx[0] / gx[-1] if gx[-1] > 0 else 0.0
+                    if razon > mayor_amplificacion:
+                        captura = dict(config=config, model=model.state_dict(), evento=muestra,
+                                       control=control_previo, amplificacion=razon,
+                                       norma_lote=gnorm, acumulacion=ACUMULACION)
+                        temporal = ruta_evento.with_suffix(".tmp")
+                        torch.save(captura, temporal)
+                        temporal.replace(ruta_evento)
+                        mayor_amplificacion = razon
+            else:
+                # Primer microlote del último lote aceptado, antes del evento.
+                control_previo = muestras[0]
         if not rechazado:
             opt.step()
         sched.step()
@@ -495,6 +526,44 @@ def main() -> None:
     print(f"\nmejor PSNR: {best_psnr:.3f} dB | {horas:.2f} h | "
           f"VRAM pico {peak:.2f} GB | lotes rechazados {rechazos} de {args.iterations} "
           f"(máx. seguidos {max_seguidos}) | rebobinados {rebobinados}", flush=True)
+
+
+    # DEBUG-16
+    if args.capturar_paso:
+        resultados = []
+        if mayor_amplificacion > 1:
+            captura = torch.load(ruta_evento, map_location="cpu", weights_only=True)
+            model.load_state_dict(captura["model"])
+            t_evento = model.T.detach().clone()
+            model.D.observe = observar
+            for tipo in ("evento", "control"):
+                muestra = captura[tipo]
+                if muestra is None:
+                    continue
+                clean = muestra["clean"].to(device)
+                noisy = muestra["noisy"].to(device).requires_grad_(mide_amp)
+                for factor in (1.0, 0.75, 0.5):
+                    with torch.no_grad():
+                        model.T.copy_(t_evento * factor)
+                    model.zero_grad(set_to_none=True)
+                    etapas = []
+                    with torch.autocast(device.type, dtype=mode["amp"], enabled=mode["amp"] is not None):
+                        ultimo = model(noisy, noisy)[-1]
+                        loss = (ultimo.float() - clean.float()).square().flatten(1).sum(1).mean()
+                    (loss / ACUMULACION).backward()
+                    gx = [e["grad_x_out"]["norma"] for e in etapas]
+                    fila = dict(tipo=tipo, it=muestra["it"], micro=muestra["micro"],
+                                factor=factor, h=model.T.item()/model.S,
+                                tau_D=model.lmbda.item()/model.S, loss=loss.item(),
+                                amplificacion=gx[0]/gx[-1] if gx[-1] > 0 else None, etapas=etapas)
+                    if tipo == "evento" and factor == 1:
+                        fila["reproduce_original"] = bool(np.allclose(gx, muestra["grad_x"], rtol=1e-4, atol=1e-7)
+                                                         and math.isclose(loss.item(), muestra["loss"], rel_tol=1e-5, abs_tol=1e-7))
+                    resultados.append(fila)
+            del model.D.observe
+        informe = dict(estado="medido" if resultados else "sin rechazo con amplificación > 1",
+                       resultados=resultados)
+        (out / "sensibilidad_paso.json").write_text(json.dumps(informe, indent=2))
 
 
 if __name__ == "__main__":
