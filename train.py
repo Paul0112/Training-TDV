@@ -84,10 +84,12 @@ MODES = {
 }
 
 
-def vnet_config(t_init: float, channels: int = CHANNELS, dataterm: str = 'denoise') -> dict:
+# CAMBIO S/MICRO-BATCH: S se guarda en la configuración del checkpoint.
+def vnet_config(t_init: float, channels: int = CHANNELS, dataterm: str = 'denoise',
+                steps: int = STEPS) -> dict:
     """Config de la VNet, verificada contra los .pth oficiales."""
     config = {
-        "S": STEPS,
+        "S": steps,
         "R": {"type": "tdv", "config": {
             "in_channels": channels, "out_channels": 1,
             "num_features": FEATURES, "num_scales": SCALES, "num_mb": MACRO_BLOCKS,
@@ -218,7 +220,16 @@ def main() -> None:
     p.add_argument("--dataterm", choices=["denoise", "poisson"], default="denoise",
                    help="Término de fidelidad de datos: denoise (L2 gaussiano) o poisson")
     
+    # CAMBIO S/MICRO-BATCH: Opciones de etapas y microlote; el lote efectivo sigue siendo de 32 parches.
+    p.add_argument("--steps", type=int, default=STEPS, help="número S de etapas desenrolladas")
+    p.add_argument("--micro-batch", type=int, default=MICRO_BATCH,
+                   help=f"parches simultáneos; debe dividir el lote efectivo de {BATCH_SIZE}")
     args = p.parse_args()
+    if args.steps < 1:
+        p.error("--steps debe ser positivo")
+    if args.micro_batch < 1 or BATCH_SIZE % args.micro_batch:
+        p.error(f"--micro-batch debe ser un divisor positivo de {BATCH_SIZE}")
+    acumulacion = BATCH_SIZE // args.micro_batch
     if args.sigma_max > 0 and not 0 <= args.sigma_min <= args.sigma_max:
         p.error(f"--sigma-min {args.sigma_min:g} tiene que estar en [0, --sigma-max "
                 f"{args.sigma_max:g}]")
@@ -249,7 +260,8 @@ def main() -> None:
     torch.backends.cuda.matmul.fp32_precision = precision
 
     # --- MODELO -------------------------------------------------------------------------------
-    config = vnet_config(args.t_init, args.channels, dataterm=args.dataterm)
+    # CAMBIO S/MICRO-BATCH: Construye la red con las etapas solicitadas.
+    config = vnet_config(args.t_init, args.channels, dataterm=args.dataterm, steps=args.steps)
     if args.noise_type == "poisson":
         config["observation"] = {"noise_type": "poisson", "peak": args.poisson_peak,
                                  "clip_noisy": False}
@@ -264,7 +276,8 @@ def main() -> None:
         args.data_root, tuple(args.train_splits.split(",")), patch_size=PATCH_SIZE,
         channels=args.channels, length=args.iterations * BATCH_SIZE, seed=args.seed * 100,
     )
-    loader = DataLoader(train_set, batch_size=MICRO_BATCH, shuffle=False, drop_last=True,
+    # CAMBIO S/MICRO-BATCH: El cargador entrega un microlote por vez.
+    loader = DataLoader(train_set, batch_size=args.micro_batch, shuffle=False, drop_last=True,
                         num_workers=16, pin_memory=(device.type == "cuda"),
                         persistent_workers=True, prefetch_factor=4)
     names = [l.strip() for l in Path(args.eval_list).read_text().splitlines() if l.strip()]
@@ -289,8 +302,9 @@ def main() -> None:
 
     out.mkdir(parents=True, exist_ok=True)
     (out / "config.json").write_text(json.dumps(vars(args), indent=2))
+    # CAMBIO S/MICRO-BATCH: Muestra las etapas y cuántos microlotes forman el lote efectivo.
     print(f"parámetros: {sum(p.numel() for p in model.parameters()):,} | "
-          f"batch {BATCH_SIZE} = {ACUMULACION}x{MICRO_BATCH} | modo {args.mode} | "
+          f"S={args.steps} | batch {BATCH_SIZE} = {acumulacion}x{args.micro_batch} | modo {args.mode} | "
           f"datos {args.data_root} ({args.channels}ch, {len(train_set.images)} imgs, "
           f"{len(eval_set)} de eval) | hitos lr {hitos} | "
           f"T_init={args.t_init:g} | lambda_init={LAMBDA_INIT:g} | "
@@ -345,7 +359,8 @@ def main() -> None:
         micros = []
         if args.capturar_paso:
             muestras = []
-        for _ in range(ACUMULACION):
+        # CAMBIO S/MICRO-BATCH: Procesa todos los microlotes antes de decidir el paso de Adam.
+        for _ in range(acumulacion):
             # El ruido se suma en CPU antes de subir: una transferencia por tensor en vez de tres.
             lote = next(lotes)
             clean = lote.to(device, non_blocking=True)
@@ -381,7 +396,8 @@ def main() -> None:
                 states = model(noisy, noisy, peak=current_peak if args.noise_type == 'poisson' else None)
                 loss = (states[-1].float() - clean.float()).pow(2).flatten(1).sum(1).mean()
 
-            (loss / ACUMULACION).backward()
+            # CAMBIO S/MICRO-BATCH: Cada microlote aporta su fracción del gradiente del lote.
+            (loss / acumulacion).backward()
             # DEBUG-14
             if args.capturar_paso:
                 muestras.append(dict(it=it, micro=len(muestras) + 1, clean=clean.detach(),
@@ -389,14 +405,15 @@ def main() -> None:
                                      grad_x=[e["grad_x_out"]["norma"] for e in etapas]))
             # DEBUG-8
             del model.D.observe
-            perdida += loss.detach() / ACUMULACION
+            # CAMBIO S/MICRO-BATCH: Promedia la pérdida y escala las normas diagnósticas según el microlote.
+            perdida += loss.detach() / acumulacion
             # `forward` devuelve los estados APILADOS, así que `states[-1]` es una vista nueva en
             # cada indexado y `retain_grad` se le pegaría a un temporal. No hace falta: de la
             # pérdida sale `p_S = 2(x_S − clean)/(MICRO_BATCH·ACUMULACION)` en forma cerrada.
             if mide_amp:
-                p0 += noisy.grad.norm() / ACUMULACION
+                p0 += noisy.grad.norm() / acumulacion
                 pS += 2 * (states[-1].detach().float() - clean.float()).norm() / (
-                    MICRO_BATCH * ACUMULACION ** 2)
+                    args.micro_batch * acumulacion ** 2)
 
         # Devuelve la norma ANTES de recortar, que es la que sirve de diagnóstico.
         # DEBUG-9
@@ -422,9 +439,10 @@ def main() -> None:
                     gx = muestra["grad_x"]
                     razon = gx[0] / gx[-1] if gx[-1] > 0 else 0.0
                     if razon > mayor_amplificacion:
+                        # CAMBIO S/MICRO-BATCH: Guarda el factor de acumulación empleado para obtener el gradiente.
                         captura = dict(config=config, model=model.state_dict(), evento=muestra,
                                        control=control_previo, amplificacion=razon,
-                                       norma_lote=gnorm, acumulacion=ACUMULACION)
+                                       norma_lote=gnorm, acumulacion=acumulacion)
                         temporal = ruta_evento.with_suffix(".tmp")
                         torch.save(captura, temporal)
                         temporal.replace(ruta_evento)
@@ -550,7 +568,8 @@ def main() -> None:
                     with torch.autocast(device.type, dtype=mode["amp"], enabled=mode["amp"] is not None):
                         ultimo = model(noisy, noisy)[-1]
                         loss = (ultimo.float() - clean.float()).square().flatten(1).sum(1).mean()
-                    (loss / ACUMULACION).backward()
+                    # CAMBIO S/MICRO-BATCH: Reproduce la escala del backward usada al capturar el microlote.
+                    (loss / acumulacion).backward()
                     gx = [e["grad_x_out"]["norma"] for e in etapas]
                     fila = dict(tipo=tipo, it=muestra["it"], micro=muestra["micro"],
                                 factor=factor, h=model.T.item()/model.S,
