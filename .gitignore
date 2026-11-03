@@ -66,3 +66,5 @@ docs/papers/*.pdf
 # Configuración local de agentes
 .claude/
 CLAUDE.md
+
+diagnostico.jsonl
