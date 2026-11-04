@@ -2,6 +2,11 @@
 
     python evaluate.py checkpoints/Oficiales/tdv3-3-25-f32-color.pth --file-list datasets/bsds500/cbsd68.txt
     python evaluate.py runs/replica/best.pth --sigma 50
+    python evaluate.py runs/pp_peak10_s0_5k/best.pth --noise-type poisson --poisson-peak 50 --poisson-train-peak 10
+
+`--poisson-train-peak` adapta lambda por peak_eval/peak_train para checkpoints Poisson
+entrenados a peak fijo cuya lambda absorbe ese factor. Sin la opción se conserva lambda.
+El cambio sólo afecta al modelo en memoria, no al checkpoint guardado.
 
 Para sigma distinto del de entrenamiento se aplica el reescalado del paper (sec. 5.2): se lleva la
 entrada al nivel de ruido de referencia y se devuelve la salida a su escala. Es una aproximación de
@@ -13,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -180,8 +186,17 @@ def main() -> None:
     p.add_argument("--output", help="escribir el reporte JSON acá")
     p.add_argument("--noise-type", choices=["gaussian", "poisson"], default="gaussian",help="Tipo de ruido con el que degradar las imágenes de prueba")
     p.add_argument("--poisson-peak", type=float, default=100.0, help="Fotones peak si se usa ruido Poisson")
+    p.add_argument("--poisson-train-peak", type=float,
+                   help="peak fijo de entrenamiento: escala lambda por peak_eval/peak_train; sólo fidelidad Poisson sin Anscombe")
     p.add_argument("--anscombe", choices=["none", "biased", "unbiased"], default="none",  help="Inversa de Anscombe para evaluar ruido Poisson")
     args = p.parse_args()
+
+    if args.poisson_train_peak is not None:
+        if args.noise_type != "poisson" or args.anscombe != "none":
+            p.error("--poisson-train-peak requiere --noise-type poisson y --anscombe none")
+        if not all(math.isfinite(v) and v > 0 for v in
+                   (args.poisson_train_peak, args.poisson_peak)):
+            p.error("los peaks de entrenamiento y evaluación deben ser positivos y finitos")
 
 
     names = None
@@ -191,7 +206,27 @@ def main() -> None:
     dataset = ImageDataset2D.from_root(args.data, args.split,
                                        channels=1 if args.gray else 3, names=names)
     model, config = load_vnet(args.checkpoint, args.device)
+    if args.poisson_train_peak is not None:
+        if config.get("D", {}).get("type") != "poisson":
+            p.error("el escalado de lambda por peak requiere un checkpoint con fidelidad Poisson")
+        peak_scaling = config["D"].get("config", {}).get("peak_scaling", "none")
+        if peak_scaling != "none":
+            p.error("el checkpoint ya declara escalado por peak; no se puede aplicar otra vez")
+        lambda_checkpoint = model.lmbda.detach().item()
+        lambda_scale = args.poisson_peak / args.poisson_train_peak
+        if not math.isfinite(lambda_scale):
+            p.error("el cociente peak_eval/peak_train debe ser finito")
+        with torch.no_grad():
+            scaled_lambda = model.lmbda * lambda_scale
+            if not torch.isfinite(scaled_lambda).all():
+                p.error("lambda escalada no es representable con el dtype del modelo")
+            model.lmbda.copy_(scaled_lambda)
     report = evaluate_denoising(model, dataset, args.sigma, args.sigma_ref, args.device, noise_type=args.noise_type, poisson_peak=args.poisson_peak, anscombe_mode=args.anscombe)
+    if args.poisson_train_peak is not None:
+        report.update(poisson_train_peak=args.poisson_train_peak,
+                      lambda_scale=lambda_scale, lambda_checkpoint=lambda_checkpoint,
+                      lambda_eval=model.lmbda.detach().item())
+        print(f"lambda     : {lambda_checkpoint:.8g} × {lambda_scale:.8g} = {model.lmbda.item():.8g}")
 
     print(f"checkpoint : {args.checkpoint}")
     print(f"Anscombe   : {args.anscombe}")
